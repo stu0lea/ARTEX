@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   artex:
-    image: artex-kali:0.3.16-local
+    image: artex-kali:0.3.16-full
     build:
       context: .
       dockerfile: Dockerfile.kali
