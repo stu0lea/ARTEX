@@ -11,14 +11,22 @@ import (
 type Block struct {
 	Kind  string
 	Text  string
-	Level int // 仅 heading 使用：1 = #，2 = ## …
+	Level int        // 仅 heading 使用：1 = #，2 = ## …
+	Rows  [][]string // 仅 table 使用：第一行是表头
 }
 
+// 行内代码用私有区标记包起来，render.py 再还原成等宽字体。
+const (
+	inlineCodeStart = "\uE003"
+	inlineCodeEnd   = "\uE004"
+)
+
 var (
-	mdImageRe   = regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`)
-	mdLinkRe    = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	mdTableSep  = regexp.MustCompile(`^\s*\|?[\s:|-]+\|[\s:|-]*$`)
-	mdHTMLTagRe = regexp.MustCompile(`<[^>]{1,80}>`)
+	inlineCodeRe = regexp.MustCompile("`([^`\\n]{1,160})`")
+	mdImageRe    = regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`)
+	mdLinkRe     = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	mdTableSep   = regexp.MustCompile(`^\s*\|?[\s:|-]+\|[\s:|-]*$`)
+	mdHTMLTagRe  = regexp.MustCompile(`<[^>]{1,80}>`)
 )
 
 // ParseReport 把 finding.Report 的 Markdown 转成顺序段落列表。
@@ -37,8 +45,8 @@ func ParseReport(md string) []Block {
 		}
 	}
 
-	for _, raw := range lines {
-		line := strings.TrimRight(raw, " \t")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimRight(lines[i], " \t")
 		trimmed := strings.TrimSpace(line)
 
 		if strings.HasPrefix(trimmed, "```") {
@@ -67,10 +75,27 @@ func ParseReport(md string) []Block {
 		if mdTableSep.MatchString(trimmed) && strings.Contains(trimmed, "|") {
 			continue // 表格分隔行
 		}
-		if strings.Contains(trimmed, "|") && strings.HasPrefix(trimmed, "|") {
-			cells := splitTableRow(trimmed)
-			if len(cells) > 0 {
-				out = append(out, Block{Kind: "text", Text: strings.Join(cells, " ｜ ")})
+		if strings.HasPrefix(trimmed, "|") {
+			// 连续以 | 开头的行组成一张表，交给 render.py 生成真正的 Word 表格。
+			rows := [][]string{}
+			if cells := splitTableRow(trimmed); len(cells) > 0 {
+				rows = append(rows, cells)
+			}
+			for i+1 < len(lines) {
+				next := strings.TrimSpace(lines[i+1])
+				if !strings.HasPrefix(next, "|") {
+					break
+				}
+				i++
+				if mdTableSep.MatchString(next) {
+					continue
+				}
+				if cells := splitTableRow(next); len(cells) > 0 {
+					rows = append(rows, cells)
+				}
+			}
+			if len(rows) > 0 {
+				out = append(out, Block{Kind: "table", Rows: rows})
 			}
 		} else {
 			out = append(out, Block{Kind: "text", Text: cleanInline(trimmed)})
@@ -99,6 +124,7 @@ func splitTableRow(line string) []string {
 func cleanInline(s string) string {
 	s = mdImageRe.ReplaceAllString(s, "")
 	s = mdLinkRe.ReplaceAllString(s, "$1（$2）")
+	s = inlineCodeRe.ReplaceAllString(s, inlineCodeStart+"$1"+inlineCodeEnd)
 	s = mdHTMLTagRe.ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, "**", "")
 	s = strings.ReplaceAll(s, "__", "")

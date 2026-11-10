@@ -2,6 +2,8 @@ package reportenhance
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/url"
 	"path/filepath"
@@ -19,6 +21,7 @@ const (
 	codeSentinel    = "\uE000" // 代码块段落 -> 等宽字体
 	captionSentinel = "\uE001" // 图注段落 -> 居中灰色
 	headSentinel    = "\uE002" // 报告内小节标题 -> 加粗
+	tableSentinel   = "\uE005" // Markdown 表格 -> 真正的 Word 表格
 )
 
 // DocData 是交给 docxtpl 的渲染数据，字段名与模板标签一一对应。
@@ -230,6 +233,12 @@ func readBody(st *evidence.Store, snap db.TrafficEvidenceSnapshot, side string) 
 func blocksToParas(bs []Block) []string {
 	out := make([]string, 0, len(bs))
 	for _, b := range bs {
+		if b.Kind == "table" {
+			if raw, err := json.Marshal(b.Rows); err == nil {
+				out = append(out, tableSentinel+base64.StdEncoding.EncodeToString(raw))
+			}
+			continue
+		}
 		if strings.TrimSpace(b.Text) == "" {
 			continue
 		}
@@ -259,9 +268,61 @@ func trimIntro(bs []Block) []Block {
 	return bs
 }
 
-// splitAtEvidence 把正文拆成两段：前一段只放 概述/复现步骤/证据（截图随后），
-// 后一段（修复建议）进入模板单独的「漏洞建议」小节。
+// splitAtEvidence 把正文拆成两段：
+//   - desc：只保留「概述 / 复现步骤 / 证据」三个二级章节（截图随后）；
+//   - after：「修复建议」的内容，进入模板单独的「漏洞建议」小节。
+//
+// 其余章节（影响与危害、受影响范围、根因分析、PoC 等）不进入 Word。
 func splitAtEvidence(bs []Block) (desc, after []string) {
+	var keep, fix []Block
+	mode := ""
+	hasKeep := false
+	for _, b := range bs {
+		if b.Kind == "heading" && b.Level >= 2 {
+			switch {
+			case isFixHeading(b.Text):
+				mode = "fix"
+			case b.Level == 2 && isKeepHeading(b.Text):
+				mode = "keep"
+				hasKeep = true
+				keep = append(keep, b)
+			case b.Level == 2:
+				mode = "drop"
+			default:
+				// 保留章节里的三级小标题跟随当前章节
+				if mode == "keep" {
+					keep = append(keep, b)
+				} else if mode == "fix" {
+					fix = append(fix, b)
+				}
+			}
+			continue
+		}
+		switch mode {
+		case "keep":
+			keep = append(keep, b)
+		case "fix":
+			fix = append(fix, b)
+		}
+	}
+	if !hasKeep {
+		// 兼容没有标准二级标题的旧报告：仍按「修复建议」切开。
+		return splitByFix(bs)
+	}
+	return blocksToParas(keep), blocksToParas(fix)
+}
+
+// isKeepHeading 是 Word「漏洞描述」下允许保留的二级章节。
+func isKeepHeading(t string) bool {
+	switch strings.TrimSpace(t) {
+	case "概述", "复现步骤", "证据":
+		return true
+	}
+	return false
+}
+
+// splitByFix 是旧报告的兜底拆分：修复建议之前全部保留。
+func splitByFix(bs []Block) (desc, after []string) {
 	cut := -1
 	for i, b := range bs {
 		if b.Kind == "heading" && isFixHeading(b.Text) {
