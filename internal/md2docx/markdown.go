@@ -24,11 +24,11 @@ const (
 // block 是 Markdown 里可以独立排版的一块内容。
 type block struct {
 	kind    blockKind
-	level   int      // 标题级别 / 列表缩进层级
-	text    string   // 段落、标题、代码、引用正文
-	lang    string   // 代码块语言（仅记录，不影响排版）
-	marker  string   // 列表原始标记，如 "-"、"1."
-	ordered bool     // 有序列表
+	level   int    // 标题级别 / 列表缩进层级
+	text    string // 段落、标题、代码、引用正文
+	lang    string // 代码块语言（仅记录，不影响排版）
+	marker  string // 列表原始标记，如 "-"、"1."
+	ordered bool   // 有序列表
 	rows    [][]string
 	aligns  []string // 表格列对齐：left/center/right
 	image   string   // 图片路径
@@ -389,20 +389,14 @@ func parseInlineStyle(s string, st inlineStyle) []run {
 			}
 
 		case s[i] == '!' && i+1 < len(s) && s[i+1] == '[':
-			alt, target, next, ok := parseLinkTarget(s, i+1)
+			_, _, next, ok := parseLinkTarget(s, i+1)
 			if !ok {
 				buf.WriteByte(s[i])
 				i++
 				continue
 			}
+			// 行内图片与 reportenhance 一样直接丢弃，只处理独占一行的图片。
 			flush()
-			if alt != "" {
-				buf.WriteString(alt)
-				flush()
-			}
-			if target != "" {
-				out = append(out, run{text: "（" + target + "）", style: st})
-			}
 			i = next
 
 		case s[i] == '[':
