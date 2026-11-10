@@ -18,6 +18,7 @@ import (
 const (
 	codeSentinel    = "\uE000" // 代码块段落 -> 等宽字体
 	captionSentinel = "\uE001" // 图注段落 -> 居中灰色
+	headSentinel    = "\uE002" // 报告内小节标题 -> 加粗
 )
 
 // DocData 是交给 docxtpl 的渲染数据，字段名与模板标签一一对应。
@@ -42,8 +43,8 @@ type System struct {
 type Vuln struct {
 	Title    string   `json:"title"`
 	Location string   `json:"location"`
-	Desc     []string `json:"desc"`
-	Fix      []string `json:"fix"`
+	Desc     []string `json:"desc"`  // 概述/复现步骤/证据（截图插在证据之后）
+	After    []string `json:"after"` // 证据之后的章节（修复建议等）
 	Severity string   `json:"severity"`
 	Shots    []Shot   `json:"shots"`
 }
@@ -133,14 +134,7 @@ func Build(ctx context.Context, opts BuildOptions, findings []*db.DBFinding) *Do
 		}
 
 		v := Vuln{Title: findingTitle(f), Location: location(f), Severity: severityCN(f.Severity)}
-		intro, sections := SplitSections(f.Report)
-		v.Desc = blocksToParas(ParseReport(intro))
-		if fix := fixSection(sections); fix != "" {
-			v.Fix = blocksToParas(ParseReport(fix))
-		}
-		if len(v.Fix) == 0 {
-			v.Fix = genericFix(f)
-		}
+		v.Desc, v.After = splitAtEvidence(ParseReport(f.Report))
 		v.Shots = buildShots(ctx, opts, f)
 		bySystem[sys] = append(bySystem[sys], v)
 
@@ -239,6 +233,10 @@ func blocksToParas(bs []Block) []string {
 		if strings.TrimSpace(b.Text) == "" {
 			continue
 		}
+		if b.Kind == "heading" {
+			out = append(out, headSentinel+b.Text)
+			continue
+		}
 		if b.Kind == "code" {
 			for _, line := range strings.Split(b.Text, "\n") {
 				out = append(out, codeSentinel+line)
@@ -250,18 +248,32 @@ func blocksToParas(bs []Block) []string {
 	return out
 }
 
-func fixSection(sections map[string]string) string {
-	for k, v := range sections {
-		if strings.Contains(k, "修复") || strings.Contains(k, "整改") || strings.Contains(k, "建议") {
-			return v
+// splitAtEvidence 把正文从「证据」小节末尾切成两段：
+// 前一段（概述/复现步骤/证据）后面紧跟报文截图，后一段（修复建议等）接在图片之后。
+func splitAtEvidence(bs []Block) (desc, after []string) {
+	ev := -1
+	for i, b := range bs {
+		if b.Kind != "heading" {
+			continue
+		}
+		t := strings.ToLower(b.Text)
+		if strings.Contains(b.Text, "证据") || strings.Contains(t, "evidence") {
+			ev = i
 		}
 	}
-	return ""
-}
-
-func genericFix(f *db.DBFinding) []string {
-	t := findingTitle(f)
-	return []string{"针对「" + t + "」问题，建议按照报告中的验证过程完成修复：对相关接口补充服务端鉴权与输入校验，限制敏感数据暴露，并在修复后进行复测确认。"}
+	cut := -1
+	if ev >= 0 {
+		for j := ev + 1; j < len(bs); j++ {
+			if bs[j].Kind == "heading" {
+				cut = j
+				break
+			}
+		}
+	}
+	if cut < 0 {
+		return blocksToParas(bs), nil
+	}
+	return blocksToParas(bs[:cut]), blocksToParas(bs[cut:])
 }
 
 func findingTitle(f *db.DBFinding) string {
@@ -275,7 +287,11 @@ func findingTitle(f *db.DBFinding) string {
 }
 
 // 兼容 report 包里的导出标题逻辑（未导出，故此处重复实现一份）。
-var mdURLRe = regexp.MustCompile("https?://[^\\s`\"'）)]+")
+var (
+	mdURLRe     = regexp.MustCompile("https?://[^\\s`\"'）)]+")
+	cnIndexRe   = regexp.MustCompile(`^[一二三四五六七八九十百]+、\s*`)
+	tailParenRe = regexp.MustCompile(`（[^）]{0,12}）$`)
+)
 
 func location(f *db.DBFinding) string {
 	for i := range f.TrafficBindings {
@@ -339,9 +355,12 @@ func hostOf(raw string) string {
 }
 
 // shortName 取任务描述首行并截断，避免把整份范围清单塞进标题。
+// 顺手去掉「一、」「（17家）」这类清单式前后缀，封面更干净。
 func shortName(s string, n int) string {
 	s = strings.TrimSpace(strings.SplitN(strings.TrimSpace(s), "\n", 2)[0])
-	return truncateRunes(s, n)
+	s = cnIndexRe.ReplaceAllString(s, "")
+	s = tailParenRe.ReplaceAllString(s, "")
+	return truncateRunes(strings.TrimSpace(s), n)
 }
 
 func severityRank(s string) int {

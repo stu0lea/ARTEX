@@ -56,6 +56,12 @@ func ParseReport(md string) []Block {
 		if trimmed == "" || trimmed == "---" || trimmed == "***" {
 			continue
 		}
+		if strings.HasPrefix(trimmed, "#") {
+			if t := cleanInline(trimmed); t != "" {
+				out = append(out, Block{Kind: "heading", Text: t})
+			}
+			continue
+		}
 		if mdTableSep.MatchString(trimmed) && strings.Contains(trimmed, "|") {
 			continue // 表格分隔行
 		}

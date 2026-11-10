@@ -57,7 +57,7 @@ def main():
     vuln_title.style = h3
     set_text(ps[110], "{{ v.location }}")
 
-    # 漏洞描述：正文段落 + 截图
+    # 漏洞描述：概述/复现步骤/证据 -> 报文截图 -> 修复建议等后续章节
     set_text(ps[112], "{%p for p in v.desc %}")
     insert_before(ps[113], "{{ p }}")
     insert_before(ps[113], "{%p endfor %}")
@@ -67,12 +67,12 @@ def main():
     cap = insert_before(ps[113], "{{ s.caption }}")
     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
     insert_before(ps[113], "{%p endfor %}")
+    insert_before(ps[113], "{%p for p in v.after %}")
+    insert_before(ps[113], "{{ p }}")
+    insert_before(ps[113], "{%p endfor %}")
 
-    # 漏洞建议：用动态内容替换模板里的固定 SQL 建议
-    set_text(ps[114], "{%p for p in v.fix %}")
-    set_text(ps[115], "{{ p }}")
-    set_text(ps[116], "{%p endfor %}")
-    for p in ps[117:123]:
+    # 模板自带的「漏洞建议」整段删除：修复建议已经在漏洞描述里
+    for p in ps[113:123]:
         remove(p)
 
     # 脆弱性评价

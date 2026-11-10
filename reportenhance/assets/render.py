@@ -16,6 +16,7 @@ from docx.oxml.ns import qn
 
 CODE_MARK = "\ue000"
 CAPTION_MARK = "\ue001"
+HEAD_MARK = "\ue002"
 IMG_WIDTH = Mm(158)
 
 
@@ -29,7 +30,7 @@ def attach_images(tpl, data):
     for system in data.get("systems") or []:
         for vuln in system.get("vulns") or []:
             vuln["desc"] = vuln.get("desc") or []
-            vuln["fix"] = vuln.get("fix") or []
+            vuln["after"] = vuln.get("after") or []
             shots = []
             for shot in vuln.get("shots") or []:
                 path = shot.get("path") or ""
@@ -72,6 +73,14 @@ def restyle(doc):
             paragraph.paragraph_format.space_before = Pt(0)
             paragraph.paragraph_format.space_after = Pt(0)
             paragraph.paragraph_format.left_indent = Mm(6)
+            continue
+        if HEAD_MARK in text:
+            strip_mark(paragraph, HEAD_MARK)
+            for run in paragraph.runs:
+                run.bold = True
+                run.font.size = Pt(10.5)
+            paragraph.paragraph_format.space_before = Pt(8)
+            paragraph.paragraph_format.space_after = Pt(4)
             continue
         if CAPTION_MARK in text:
             strip_mark(paragraph, CAPTION_MARK)
