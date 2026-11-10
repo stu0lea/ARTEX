@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CheckIcon, CopyIcon, FileDownIcon, FileTextIcon, Loader2Icon } from "lucide-react";
+import { CheckIcon, CopyIcon, FileDownIcon, FileTextIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Markdown } from "@/components/markdown";
@@ -15,7 +15,7 @@ export function ReportTab({ taskId }: { taskId: string }) {
   const [report, setReport] = React.useState<string>("");
   const [loading, setLoading] = React.useState(true);
   const [copied, setCopied] = React.useState(false);
-  const [docxState, setDocxState] = React.useState<"idle" | "running" | "done" | "failed">("idle");
+  const [docxState, setDocxState] = React.useState<"checking" | "idle" | "running" | "done" | "failed">("checking");
   const [docxError, setDocxError] = React.useState("");
 
   React.useEffect(() => {
@@ -31,6 +31,27 @@ export function ReportTab({ taskId }: { taskId: string }) {
       })
       .finally(() => {
         if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [taskId]);
+
+  // 进入页面先恢复状态：内存中的任务或磁盘上已生成的报告都直接显示「下载 Word」，
+  // 避免每次重新访问都只能再生成一遍。
+  React.useEffect(() => {
+    let active = true;
+    setDocxState("checking");
+    api
+      .reportDocxStatus(taskId)
+      .then((st) => {
+        if (!active) return;
+        const next = st.state === "done" ? "done" : st.state === "running" ? "running" : st.state === "failed" ? "failed" : "idle";
+        setDocxState((cur) => (cur === "checking" ? next : cur));
+        if (st.state === "failed") setDocxError(st.error ?? "");
+      })
+      .catch(() => {
+        if (active) setDocxState((cur) => (cur === "checking" ? "idle" : cur));
       });
     return () => {
       active = false;
@@ -54,20 +75,24 @@ export function ReportTab({ taskId }: { taskId: string }) {
     return () => clearInterval(timer);
   }, [docxState, taskId]);
 
-  async function generateDocx() {
+  async function startDocx() {
     setDocxError("");
+    setDocxState("running");
     try {
-      if (docxState === "done") {
-        await api.downloadReportDocx(taskId);
-        return;
-      }
-      setDocxState("running");
       const job = await api.reportDocxStart(taskId);
       if (job.state !== "running") setDocxState(job.state === "done" ? "done" : "failed");
     } catch (e) {
       setDocxState("failed");
       setDocxError(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  async function generateDocx() {
+    if (docxState === "done") {
+      await api.downloadReportDocx(taskId);
+      return;
+    }
+    await startDocx();
   }
 
   async function copy() {
@@ -112,10 +137,21 @@ export function ReportTab({ taskId }: { taskId: string }) {
           <FileTextIcon className="size-4" /> 渗透测试报告（Markdown）
         </CardTitle>
         <div className="flex gap-2">
-          <Button size="sm" variant={docxState === "done" ? "default" : "outline"} onClick={generateDocx} disabled={docxState === "running"}>
+          <Button size="sm" variant={docxState === "done" ? "default" : "outline"} onClick={generateDocx} disabled={docxState === "running" || docxState === "checking"}>
             {docxState === "running" ? <Loader2Icon className="animate-spin" /> : <FileDownIcon />}
-            {docxState === "running" ? "生成中…" : docxState === "done" ? "下载 Word" : "生成 Word"}
+            {docxState === "running"
+              ? "生成中…"
+              : docxState === "checking"
+                ? "检查中…"
+                : docxState === "done"
+                  ? "下载 Word"
+                  : "生成 Word"}
           </Button>
+          {docxState === "done" && (
+            <Button size="sm" variant="outline" onClick={startDocx}>
+              <RefreshCwIcon /> 重新生成
+            </Button>
+          )}
           {report && (
             <Button size="sm" variant="outline" onClick={copy}>
               {copied ? <CheckIcon /> : <CopyIcon />} 复制

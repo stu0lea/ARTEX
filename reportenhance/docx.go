@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -97,16 +98,43 @@ func (m *Manager) finish(j *Job, file string, err error) {
 	}
 }
 
-// Status 返回该任务最近一次生成状态。
+// Status 返回该任务最近一次生成状态。进程重启后内存记录会丢失，
+// 此时回退到磁盘上最新的 docx，保证页面仍能直接下载已生成的报告。
 func (m *Manager) Status(taskID int64) *Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	j := m.jobs[taskID]
-	if j == nil {
-		return nil
+	if j := m.jobs[taskID]; j != nil {
+		cp := *j
+		return &cp
 	}
-	cp := *j
-	return &cp
+	if j, ok := m.latestReport(taskID); ok {
+		return j
+	}
+	return nil
+}
+
+// latestReport 查找 data/reports/<task>/ 下修改时间最新的 docx。
+func (m *Manager) latestReport(taskID int64) (*Job, bool) {
+	matches, err := filepath.Glob(filepath.Join(m.dir, fmt.Sprintf("%d", taskID), "*.docx"))
+	if err != nil || len(matches) == 0 {
+		return nil, false
+	}
+	var best string
+	var bestMod time.Time
+	for _, path := range matches {
+		fi, err := os.Stat(path)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if best == "" || fi.ModTime().After(bestMod) {
+			best, bestMod = path, fi.ModTime()
+		}
+	}
+	if best == "" {
+		return nil, false
+	}
+	id := strings.TrimSuffix(filepath.Base(best), filepath.Ext(best))
+	return &Job{ID: id, TaskID: taskID, State: "done", File: best, Started: bestMod, Finished: bestMod}, true
 }
 
 // Render 调用镜像内的 Python + docxtpl 把数据套进客户模板。
