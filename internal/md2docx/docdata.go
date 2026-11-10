@@ -88,9 +88,20 @@ var (
 )
 
 // FromMarkdown 把一份导出的漏洞 Markdown 转成模板数据。
+// 支持两种输入：
+//   - 单个漏洞报告（含「详细报告」章节）
+//   - 漏洞发现汇总报告（含「漏洞明细」以及多个 ### N. [SEV] 章节）
+//
 // baseDir 用于解析 Markdown 里相对路径的截图。
 func FromMarkdown(md, baseDir string, opts ConvertOptions) *DocData {
 	md = strings.TrimPrefix(md, "\ufeff")
+	if summary, ok := parseSummaryReport(md); ok {
+		return fromSummaryReport(summary, baseDir, opts)
+	}
+	return fromSingleReport(md, baseDir, opts)
+}
+
+func fromSingleReport(md, baseDir string, opts ConvertOptions) *DocData {
 	metaText, report := splitDetailReport(md)
 	meta := parseMeta(metaText)
 
@@ -118,7 +129,7 @@ func FromMarkdown(md, baseDir string, opts ConvertOptions) *DocData {
 
 	project := strings.TrimSpace(opts.Project)
 	if project == "" {
-		project = shortName(meta["所属任务"], 40)
+		project = projectLabel(metaText, meta["所属任务"], title, report)
 	}
 	if project == "" {
 		project = "目标"
@@ -305,6 +316,108 @@ func shortName(s string, n int) string {
 	s = cnIndexRe.ReplaceAllString(s, "")
 	s = tailParenRe.ReplaceAllString(s, "")
 	return truncateRunes(strings.TrimSpace(s), n)
+}
+
+// projectLabel 从「所属任务」里选一个最相关的地址作为报告项目名。
+// 单漏洞报告的所属任务经常是一长串资产 URL，不能直接拿第一行；
+// 优先选在标题/正文里出现次数最多的主机，并去掉协议和端口。
+func projectLabel(metaText, raw, title, report string) string {
+	raw = strings.TrimSpace(raw)
+	urls := collectTaskURLs(metaText)
+	if len(urls) == 0 {
+		urls = mdURLRe.FindAllString(raw, -1)
+	}
+	if len(urls) == 0 {
+		return shortName(raw, 40)
+	}
+	if best := chooseBestURL(urls, title, report); best != "" {
+		if h := hostOf(best); h != "" {
+			return h
+		}
+	}
+	return shortName(raw, 40)
+}
+
+// collectTaskURLs 收集「所属任务」条目下紧跟的多行 URL。
+func collectTaskURLs(text string) []string {
+	var urls []string
+	collecting := false
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.Contains(t, "**所属任务**") {
+			collecting = true
+			urls = append(urls, mdURLRe.FindAllString(t, -1)...)
+			continue
+		}
+		if !collecting {
+			continue
+		}
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "#") || strings.HasPrefix(t, "- **") ||
+			strings.HasPrefix(t, "* **") || strings.HasPrefix(t, "**") {
+			break
+		}
+		if strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") {
+			urls = append(urls, mdURLRe.FindAllString(t, -1)...)
+			continue
+		}
+		break
+	}
+	return urls
+}
+
+func chooseBestURL(urls []string, title, report string) string {
+	context := title + "\n" + report
+	best := ""
+	bestScore := -1
+	bestLen := 0
+	for _, raw := range urls {
+		raw = strings.TrimRight(strings.TrimSpace(raw), ".,;:，。；：、")
+		h := hostOf(raw)
+		if h == "" {
+			continue
+		}
+		// 必须按完整主机名匹配：icsc.mall.icbc.com.cn 不能算作 icbc.com.cn 的一次出现。
+		score := hostCount(title, h)*100 + hostCount(context, h)
+		if strings.HasPrefix(strings.ToLower(raw), "https://") {
+			score++
+		}
+		if score > bestScore || (score == bestScore && len(h) > bestLen) {
+			best, bestScore, bestLen = raw, score, len(h)
+		}
+	}
+	return best
+}
+
+func hostCount(text, host string) int {
+	text = strings.ToLower(text)
+	host = strings.ToLower(host)
+	if host == "" {
+		return 0
+	}
+	count := 0
+	for start := 0; start < len(text); {
+		i := strings.Index(text[start:], host)
+		if i < 0 {
+			break
+		}
+		i += start
+		after := i + len(host)
+		beforeOK := i == 0 || !isHostChar(text[i-1])
+		afterOK := after >= len(text) || !isHostChar(text[after])
+		if beforeOK && afterOK {
+			count++
+		}
+		start = i + 1
+	}
+	return count
+}
+
+func isHostChar(b byte) bool {
+	return b == '.' || b == '-' || b == '_' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 func truncateRunes(s string, n int) string {

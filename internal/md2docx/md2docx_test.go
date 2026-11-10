@@ -270,6 +270,108 @@ func TestReplaceTagsInTable(t *testing.T) {
 	}
 }
 
+const sampleSummary = "# 漏洞发现汇总报告\n\n" +
+	"- **生成时间**：2026-11-10 13:56:06\n" +
+	"- **发现总数**：2 个\n\n" +
+	"## 摘要\n\n" +
+	"| 严重等级 | 数量 |\n| --- | --- |\n| 严重 | 1 |\n| 高危 | 0 |\n| 中危 | 1 |\n| 低危 | 0 |\n\n" +
+	"## 漏洞明细\n\n" +
+	"### 1. [CRITICAL] a.example.com 未授权访问\n\n" +
+	"- **类别**：未授权访问\n" +
+	"- **状态**：已确认\n" +
+	"- **所属任务**：https://a.example.com/\n" +
+	"- **发现时间**：2026-11-09 10:00:00\n\n" +
+	"匿名即可访问。\n\n" +
+	"**证据：**\n\n```text\nGET /admin\n```\n\n" +
+	"**详细报告：**\n\n" +
+	"# 未授权访问\n\n" +
+	"- **所属任务**：https://a.example.com/\n\n" +
+	"## 概述\n\n后台 http://a.example.com/admin 可匿名访问。\n\n" +
+	"## 复现步骤\n\n1. 打开后台\n\n" +
+	"## 证据\n\n```http\nGET /admin HTTP/1.1\nHost: a.example.com\n```\n\n" +
+	"## 修复建议\n\n增加鉴权。\n\n" +
+	"### 2. [MEDIUM] b.example.com SQL 注入\n\n" +
+	"- **类别**：SQL注入\n" +
+	"- **状态**：已确认\n" +
+	"- **所属任务**：https://b.example.com/\n" +
+	"- **发现时间**：2026-11-09 11:00:00\n\n" +
+	"**详细报告：**\n\n" +
+	"## 概述\n\nhttp://b.example.com/item?id=1 存在注入。\n\n" +
+	"## 复现步骤\n\n1. 修改 id\n\n" +
+	"## 证据\n\n```text\n### 9. [HIGH] 这段在代码块里，不是漏洞\npayload\n```\n\n" +
+	"## 修复建议\n\n参数化查询。\n"
+
+func TestFromSummaryMarkdown(t *testing.T) {
+	data := FromMarkdown(sampleSummary, t.TempDir(), ConvertOptions{})
+	if data.Total != 2 || data.High != 1 || data.Medium != 1 || data.Low != 0 {
+		t.Fatalf("counts = total:%d high:%d medium:%d low:%d", data.Total, data.High, data.Medium, data.Low)
+	}
+	if data.ProjectName != "a.example.com" {
+		t.Fatalf("project = %q", data.ProjectName)
+	}
+	if data.DateCN != "2026年11月10日" {
+		t.Fatalf("date = %q", data.DateCN)
+	}
+	if data.Risk != "严重状态" {
+		t.Fatalf("risk = %q", data.Risk)
+	}
+	if len(data.Systems) != 2 {
+		t.Fatalf("systems = %+v", data.Systems)
+	}
+	if data.Systems[0].Name != "a.example.com" || data.Systems[1].Name != "b.example.com" {
+		t.Fatalf("system order = %+v", data.Systems)
+	}
+	if len(data.Groups) != 2 || data.Groups[0].Name != "未授权访问" || data.Groups[0].Count != 1 {
+		t.Fatalf("groups = %+v", data.Groups)
+	}
+	v := data.Systems[0].Vulns[0]
+	if v.Title != "a.example.com 未授权访问" || v.Severity != "严重" {
+		t.Fatalf("vuln = %+v", v)
+	}
+	if v.Location != "http://a.example.com/admin" {
+		t.Fatalf("location = %q", v.Location)
+	}
+	if !strings.Contains(strings.Join(v.Desc, "\n"), headSentinel+"概述") {
+		t.Fatalf("desc = %+v", v.Desc)
+	}
+	if !strings.Contains(strings.Join(v.After, "\n"), "增加鉴权") {
+		t.Fatalf("after = %+v", v.After)
+	}
+}
+
+func TestSummaryRender(t *testing.T) {
+	data := FromMarkdown(sampleSummary, t.TempDir(), ConvertOptions{})
+	out, err := Render(FallbackTemplate(), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(unzip(t, out)["word/document.xml"])
+	if err := ValidateXML([]byte(doc)); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	for _, bad := range []string{"{{", "{%", "}}", "%}"} {
+		if strings.Contains(doc, bad) {
+			t.Fatalf("template tag left in document: %s", bad)
+		}
+	}
+	for _, want := range []string{"a.example.com 未授权访问", "b.example.com SQL 注入"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("document missing %q", want)
+		}
+	}
+	if strings.Count(doc, "漏洞名称：") != 2 {
+		t.Fatalf("vuln count in document = %d", strings.Count(doc, "漏洞名称："))
+	}
+}
+
+func TestProjectLabelPrefersSpecificHost(t *testing.T) {
+	meta := "- **所属任务**：http://m.example.com\nhttps://app.example.com\n"
+	got := projectLabel(meta, "http://m.example.com", "app.example.com 漏洞", "访问 https://app.example.com/x")
+	if got != "app.example.com" {
+		t.Fatalf("project = %q", got)
+	}
+}
+
 func unzip(t *testing.T, b []byte) map[string][]byte {
 	t.Helper()
 	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))

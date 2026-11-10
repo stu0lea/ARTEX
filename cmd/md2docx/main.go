@@ -1,7 +1,9 @@
 // md2docx 把 ARTEX 导出的漏洞 Markdown 报告转成与模板一致的 Word 文档。
+// 支持单个漏洞报告和「漏洞发现汇总报告」；汇总报告会一次生成一个包含全部漏洞的 docx。
 //
 //	go build -o md2docx ./cmd/md2docx
 //	./md2docx -in finding.md -out finding.docx
+//	./md2docx -in findings-20261110.md -out summary.docx
 //	./md2docx -in ./export -out ./word
 package main
 
