@@ -9,8 +9,9 @@ import (
 // Kind: text（普通段落）/ code（等宽代码块）。图片不在这里处理，
 // PoC 截图按文件命名约定单独收集。
 type Block struct {
-	Kind string
-	Text string
+	Kind  string
+	Text  string
+	Level int // 仅 heading 使用：1 = #，2 = ## …
 }
 
 var (
@@ -58,7 +59,8 @@ func ParseReport(md string) []Block {
 		}
 		if strings.HasPrefix(trimmed, "#") {
 			if t := cleanInline(trimmed); t != "" {
-				out = append(out, Block{Kind: "heading", Text: t})
+				lvl := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
+				out = append(out, Block{Kind: "heading", Text: t, Level: lvl})
 			}
 			continue
 		}

@@ -4,9 +4,11 @@
 用法：python3 insert_tags.py <原始模板.docx> <输出.docx>
 原始模板不改动；本脚本只需要跑一次，产物随代码提交。
 """
+import copy
 import sys
 
 from docx import Document
+from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 
@@ -19,6 +21,14 @@ def set_text(p, text):
 
 def insert_before(p, text):
     np = p.insert_paragraph_before(text)
+    return np
+
+
+def insert_body_before(p, text, body_ppr):
+    """正文段落沿用模板正文的首行缩进/字体设置。"""
+    np = p.insert_paragraph_before(text)
+    if body_ppr is not None:
+        np._p.insert(0, copy.deepcopy(body_ppr))
     return np
 
 
@@ -57,9 +67,13 @@ def main():
     vuln_title.style = h3
     set_text(ps[110], "{{ v.location }}")
 
-    # 漏洞描述：概述/复现步骤/证据 -> 报文截图 -> 修复建议等后续章节
+    # 正文段落沿用模板的首行缩进（用户模板里是 2 字符）
+    body_ppr = ps[112]._p.find(qn("w:pPr"))
+    body_ppr = copy.deepcopy(body_ppr) if body_ppr is not None else None
+
+    # 漏洞描述：只放 概述 / 复现步骤 / 证据，证据之后紧跟报文截图
     set_text(ps[112], "{%p for p in v.desc %}")
-    insert_before(ps[113], "{{ p }}")
+    insert_body_before(ps[113], "{{ p }}", body_ppr)
     insert_before(ps[113], "{%p endfor %}")
     insert_before(ps[113], "{%p for s in v.shots %}")
     img = insert_before(ps[113], "{{ s.img }}")
@@ -67,13 +81,15 @@ def main():
     cap = insert_before(ps[113], "{{ s.caption }}")
     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
     insert_before(ps[113], "{%p endfor %}")
-    insert_before(ps[113], "{%p for p in v.after %}")
-    insert_before(ps[113], "{{ p }}")
-    insert_before(ps[113], "{%p endfor %}")
 
-    # 模板自带的「漏洞建议」整段删除：修复建议已经在漏洞描述里
-    for p in ps[113:123]:
+    # 「漏洞建议」单独成节：内容来自原 md 的修复建议
+    insert_before(ps[113], "{%p if v.after %}")
+    for p in ps[114:123]:
         remove(p)
+    insert_before(ps[123], "{%p for p in v.after %}")
+    insert_body_before(ps[123], "{{ p }}", body_ppr)
+    insert_before(ps[123], "{%p endfor %}")
+    insert_before(ps[123], "{%p endif %}")
 
     # 脆弱性评价
     set_text(ps[124], "{{ v.severity }}")

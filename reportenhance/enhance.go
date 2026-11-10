@@ -134,7 +134,7 @@ func Build(ctx context.Context, opts BuildOptions, findings []*db.DBFinding) *Do
 		}
 
 		v := Vuln{Title: findingTitle(f), Location: location(f), Severity: severityCN(f.Severity)}
-		v.Desc, v.After = splitAtEvidence(ParseReport(f.Report))
+		v.Desc, v.After = splitAtEvidence(trimIntro(ParseReport(f.Report)))
 		v.Shots = buildShots(ctx, opts, f)
 		bySystem[sys] = append(bySystem[sys], v)
 
@@ -248,32 +248,36 @@ func blocksToParas(bs []Block) []string {
 	return out
 }
 
-// splitAtEvidence 把正文从「证据」小节末尾切成两段：
-// 前一段（概述/复现步骤/证据）后面紧跟报文截图，后一段（修复建议等）接在图片之后。
-func splitAtEvidence(bs []Block) (desc, after []string) {
-	ev := -1
+// trimIntro 丢掉第一个二级标题之前的内容（报告标题、类型/等级/资产/证据文件
+// 这类速览清单），Word 里的「漏洞描述」直接从「概述」开始。
+func trimIntro(bs []Block) []Block {
 	for i, b := range bs {
-		if b.Kind != "heading" {
-			continue
-		}
-		t := strings.ToLower(b.Text)
-		if strings.Contains(b.Text, "证据") || strings.Contains(t, "evidence") {
-			ev = i
+		if b.Kind == "heading" && b.Level >= 2 {
+			return bs[i:]
 		}
 	}
+	return bs
+}
+
+// splitAtEvidence 把正文拆成两段：前一段只放 概述/复现步骤/证据（截图随后），
+// 后一段（修复建议）进入模板单独的「漏洞建议」小节。
+func splitAtEvidence(bs []Block) (desc, after []string) {
 	cut := -1
-	if ev >= 0 {
-		for j := ev + 1; j < len(bs); j++ {
-			if bs[j].Kind == "heading" {
-				cut = j
-				break
-			}
+	for i, b := range bs {
+		if b.Kind == "heading" && isFixHeading(b.Text) {
+			cut = i
+			break
 		}
 	}
 	if cut < 0 {
 		return blocksToParas(bs), nil
 	}
-	return blocksToParas(bs[:cut]), blocksToParas(bs[cut:])
+	// 丢掉「修复建议」标题本身，模板已有「漏洞建议」标题
+	return blocksToParas(bs[:cut]), blocksToParas(bs[cut+1:])
+}
+
+func isFixHeading(t string) bool {
+	return strings.Contains(t, "修复") || strings.Contains(t, "整改") || strings.Contains(t, "加固建议")
 }
 
 func findingTitle(f *db.DBFinding) string {
