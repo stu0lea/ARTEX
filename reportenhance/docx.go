@@ -137,6 +137,21 @@ func (m *Manager) latestReport(taskID int64) (*Job, bool) {
 	return &Job{ID: id, TaskID: taskID, State: "done", File: best, Started: bestMod, Finished: bestMod}, true
 }
 
+// templateBytes 返回本次渲染使用的模板：优先 ARTEX_REPORT_TEMPLATE 指向的
+// 运行时模板（容器里挂载仓库中的 docx，改完下次生成即生效），否则回退到
+// 编译进二进制的内置模板。
+func (m *Manager) templateBytes() ([]byte, string, error) {
+	if p := strings.TrimSpace(os.Getenv("ARTEX_REPORT_TEMPLATE")); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return b, p, nil
+		} else {
+			log.Printf("[reportenhance] 读取运行时模板 %s 失败，回退内置模板: %v", p, err)
+		}
+	}
+	b, err := assets.ReadFile("assets/report-template-auto.docx")
+	return b, "embedded", err
+}
+
 // Render 调用镜像内的 Python + docxtpl 把数据套进客户模板。
 func (m *Manager) Render(ctx context.Context, data *DocData, out string) error {
 	python := os.Getenv("PYTHON_BIN")
@@ -159,9 +174,12 @@ func (m *Manager) Render(ctx context.Context, data *DocData, out string) error {
 	if err != nil {
 		return err
 	}
-	tpl, err := assets.ReadFile("assets/report-template-auto.docx")
+	tpl, tplPath, err := m.templateBytes()
 	if err != nil {
 		return err
+	}
+	if tplPath != "embedded" {
+		log.Printf("[reportenhance] 使用运行时 Word 模板: %s", tplPath)
 	}
 	raw, err := json.Marshal(data)
 	if err != nil {
