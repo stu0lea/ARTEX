@@ -175,10 +175,8 @@ def restyle(doc):
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             paragraph.paragraph_format.space_after = Pt(10)
             continue
-        # 正文统一小四（12pt）；模板里已显式设过字号的不动
-        for run in paragraph.runs:
-            if run.font.size is None:
-                run.font.size = Pt(12)
+        # 普通正文不写死字号：沿用模板 Normal（当前为宋体 12pt）。
+        # 写死 12pt 会把模板里靠样式控制的大章节标题（如“第四章”）压小。
 
 
 def _cell_shade(cell, fill):
