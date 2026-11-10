@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-//go:embed assets/render.py assets/report-template-auto.docx
+//go:embed assets/render.py assets/report-template-fallback.docx
 var assets embed.FS
 
 // Job 是一次 Word 生成任务的状态快照。
@@ -148,7 +148,7 @@ func (m *Manager) templateBytes() ([]byte, string, error) {
 			log.Printf("[reportenhance] 读取运行时模板 %s 失败，回退内置模板: %v", p, err)
 		}
 	}
-	b, err := assets.ReadFile("assets/report-template-auto.docx")
+	b, err := assets.ReadFile("assets/report-template-fallback.docx")
 	return b, "embedded", err
 }
 

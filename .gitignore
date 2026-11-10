@@ -58,3 +58,5 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+# 客户 Word 报告模板（含客户标识，不提交；本地由 docker-compose 挂载）
+/reportenhance/assets/report-template-auto.docx
