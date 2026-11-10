@@ -55,6 +55,12 @@ RUN npm install -g --registry=https://registry.npmmirror.com \
     && playwright-cli --help \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
+# Word 报告渲染：中文字体（Chromium 截图 + docx 中文显示）与 docxtpl。
+# 单独成层，避免改动上面的 apt 指令导致 kali-linux-headless 整层重装。
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --break-system-packages --no-cache-dir docxtpl==0.20.2
 WORKDIR /app
 # 预编译好的对应架构二进制（dist/amd64/artex 或 dist/arm64/artex）
 COPY dist/${TARGETARCH}/artex /app/artex

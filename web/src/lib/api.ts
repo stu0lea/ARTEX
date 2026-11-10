@@ -872,6 +872,27 @@ export const api = {
     if (!r.ok) throw new Error(`report: ${r.status}`);
     return r.text();
   },
+  // Word 报告：异步生成 + 轮询状态 + 下载。
+  reportDocxStart: (task?: string) =>
+    post<{ id: string; state: string; error?: string }>(`/report/docx${tq(task)}`),
+  reportDocxStatus: (task?: string) =>
+    get<{ id?: string; state: string; error?: string }>(`/report/docx/status${tq(task)}`),
+  downloadReportDocx: async (task?: string) => {
+    const token = getToken();
+    const r = await fetch(`/api/report/docx/download${tq(task)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!r.ok) throw new Error(`report docx: ${r.status}`);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `report-${task ?? "task"}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   chatMentions: (kind: string, query: string, signal?: AbortSignal, cursor = "") =>
     http<{ items: ChatMention[]; next_cursor?: string }>(
       `/chat/mentions?${new URLSearchParams({ kind, q: query, cursor })}`,

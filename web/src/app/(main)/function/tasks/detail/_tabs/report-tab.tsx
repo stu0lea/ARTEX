@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CheckIcon, CopyIcon, FileTextIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, FileDownIcon, FileTextIcon, Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Markdown } from "@/components/markdown";
@@ -15,6 +15,8 @@ export function ReportTab({ taskId }: { taskId: string }) {
   const [report, setReport] = React.useState<string>("");
   const [loading, setLoading] = React.useState(true);
   const [copied, setCopied] = React.useState(false);
+  const [docxState, setDocxState] = React.useState<"idle" | "running" | "done" | "failed">("idle");
+  const [docxError, setDocxError] = React.useState("");
 
   React.useEffect(() => {
     let active = true;
@@ -34,6 +36,39 @@ export function ReportTab({ taskId }: { taskId: string }) {
       active = false;
     };
   }, [taskId]);
+
+  // Word 生成是异步任务：每 3 秒查一次状态，完成后按钮变成「下载」。
+  React.useEffect(() => {
+    if (docxState !== "running") return;
+    const timer = setInterval(async () => {
+      try {
+        const st = await api.reportDocxStatus(taskId);
+        if (st.state === "running") return;
+        setDocxState(st.state === "done" ? "done" : "failed");
+        setDocxError(st.error ?? "");
+        if (st.state === "done") toast.success("Word 报告已生成");
+      } catch {
+        /* 网络抖动继续轮询 */
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [docxState, taskId]);
+
+  async function generateDocx() {
+    setDocxError("");
+    try {
+      if (docxState === "done") {
+        await api.downloadReportDocx(taskId);
+        return;
+      }
+      setDocxState("running");
+      const job = await api.reportDocxStart(taskId);
+      if (job.state !== "running") setDocxState(job.state === "done" ? "done" : "failed");
+    } catch (e) {
+      setDocxState("failed");
+      setDocxError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   async function copy() {
     if (!report) return;
@@ -77,6 +112,10 @@ export function ReportTab({ taskId }: { taskId: string }) {
           <FileTextIcon className="size-4" /> 渗透测试报告（Markdown）
         </CardTitle>
         <div className="flex gap-2">
+          <Button size="sm" variant={docxState === "done" ? "default" : "outline"} onClick={generateDocx} disabled={docxState === "running"}>
+            {docxState === "running" ? <Loader2Icon className="animate-spin" /> : <FileDownIcon />}
+            {docxState === "running" ? "生成中…" : docxState === "done" ? "下载 Word" : "生成 Word"}
+          </Button>
           {report && (
             <Button size="sm" variant="outline" onClick={copy}>
               {copied ? <CheckIcon /> : <CopyIcon />} 复制
@@ -84,7 +123,10 @@ export function ReportTab({ taskId }: { taskId: string }) {
           )}
         </div>
       </CardHeader>
-      <CardContent>{content}</CardContent>
+      <CardContent>
+        {docxError && <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-xs">{docxError}</div>}
+        {content}
+      </CardContent>
     </Card>
   );
 }
