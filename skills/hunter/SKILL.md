@@ -15,7 +15,13 @@ description: 使用奇安信鹰图（Hunter）API 做网络空间资产测绘：
 
 ## 配置
 
-- API Key 从环境变量 `HUNTER_API_KEY` 读取。
+API Key 按以下优先级读取（脚本已实现，改一处即可）：
+
+1. `--api-key` 参数（不推荐，会进命令历史）
+2. 环境变量 `HUNTER_API_KEY`
+3. 文件 `<skill_dir>/.hunter_key`（推荐：`./skills` 挂载自宿主机，改文件即可）
+4. 环境变量 `HUNTER_API_KEY_FILE` 指向的文件
+
 - **禁止**把 API Key 写入本文件、命令行明文或报告。缺失时直接报错停止，不要猜。
 - 脚本自带 base64 编码、分页和错误处理，不要手写 curl 拼接。
 

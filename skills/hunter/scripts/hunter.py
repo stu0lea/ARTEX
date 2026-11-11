@@ -142,6 +142,28 @@ def to_assets(items, max_assets):
     return {"assets": [merged[k] for k in order]}
 
 
+def load_key(args):
+    if args.api_key:
+        return args.api_key.strip()
+    key = os.environ.get("HUNTER_API_KEY", "").strip()
+    if key:
+        return key
+    # 兜底：读文件（./skills 是宿主机挂载，改文件即可，不依赖容器环境变量）
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in (os.environ.get("HUNTER_API_KEY_FILE", ""),
+                 os.path.join(here, ".hunter_key"),
+                 os.path.join(os.path.expanduser("~"), ".hunter_key")):
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    v = f.read().strip()
+                if v:
+                    return v
+            except OSError:
+                pass
+    return ""
+
+
 def main():
     ap = argparse.ArgumentParser(description="Hunter API query / asset mapping")
     ap.add_argument("--query", required=True, help="鹰图查询语句")
@@ -158,7 +180,7 @@ def main():
     ap.add_argument("--no-proxy", action="store_true")
     args = ap.parse_args()
 
-    key = args.api_key or os.environ.get("HUNTER_API_KEY", "")
+    key = load_key(args)
     if not key:
         sys.exit("HUNTER_API_KEY not set")
 
