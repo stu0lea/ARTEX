@@ -1,6 +1,7 @@
 ---
 name: hunter
 description: 使用奇安信鹰图（Hunter）API 做网络空间资产测绘：按 IP、域名、端口、指纹、证书、标题等查询互联网资产，并把结果登记进资产图。当用户提到鹰图、Hunter、空间测绘、IP 反查域名、同 IP 旁站、指纹/证书搜索、资产扩展时使用。
+mcps: hunter
 ---
 
 # 鹰图 Hunter 资产测绘
@@ -26,6 +27,9 @@ API Key 按以下优先级读取（脚本已实现，改一处即可）：
 - 脚本自带 base64 编码、分页和错误处理，不要手写 curl 拼接。
 
 ## 用法
+
+优先用 MCP 工具（若本 skill 的 `mcps` 已解锁，工具名为 `mcp__hunter__hunter_search` /
+`mcp__hunter__hunter_map_assets`）；MCP 未配置时用下面的脚本。
 
 技能加载时会给出本 skill 的目录路径；脚本在 `<skill_dir>/scripts/hunter.py`。不确定路径时用
 `find / -path '*/hunter/scripts/hunter.py' 2>/dev/null | head -1` 定位。
