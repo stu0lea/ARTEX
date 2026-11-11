@@ -50,6 +50,9 @@ RUN case "${TARGETARCH}" in \
 # @playwright/cli：提供 playwright-cli，装完顺带 --help 验证可执行。
 # 再装 playwright（提供浏览器管理），装完用 --with-deps 预置 chromium 及其系统依赖，
 # 这样容器内 MCP/CLI 首次启动即可用，不再联网下载浏览器。
+# 浏览器走国内镜像下载，官方 CDN 在国内几乎不可用；可用 --build-arg 覆盖。
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
+ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 RUN npm install -g --registry=https://registry.npmmirror.com \
       @playwright/mcp@latest @playwright/cli@latest playwright@latest \
     && playwright-cli --help \
