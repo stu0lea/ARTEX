@@ -33,8 +33,18 @@ func findingTitle(f *db.DBFinding) string {
 }
 
 // FindingsMarkdown 把一批 findings 整合成一份汇总报告(摘要 + 按严重等级分组,
-// 每条含类别/状态/所属任务/证据/详细报告)。
+// 每条含类别/状态/所属任务/证据/详细报告与流量证据)。
 func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
+	return findingsMarkdown(fs, generatedAt, true)
+}
+
+// FindingsMarkdownForDocx 生成 Word 报告用的 Markdown：正文里的请求/响应报文
+// 仍会保留为代码块,但不再附带需要额外导出文件的流量证据章节。
+func FindingsMarkdownForDocx(fs []*db.DBFinding, generatedAt time.Time) string {
+	return findingsMarkdown(fs, generatedAt, false)
+}
+
+func findingsMarkdown(fs []*db.DBFinding, generatedAt time.Time, includeTraffic bool) string {
 	items := append([]*db.DBFinding(nil), fs...)
 	sortFindingsForExport(items)
 
@@ -59,6 +69,11 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 
 	if len(items) == 0 {
 		b.WriteString("_无匹配的漏洞。_\n")
+		if !includeTraffic {
+			// Word 解析器用「漏洞明细」标记区分汇总报告与单条报告；
+			// 空结果也要保留标记，否则会被当成一条低危漏洞。
+			b.WriteString("\n## 漏洞明细\n")
+		}
 		return b.String()
 	}
 
@@ -79,12 +94,21 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 		if e := strings.TrimSpace(f.Evidence); e != "" {
 			fmt.Fprintf(&b, "**证据：**\n\n```\n%s\n```\n\n", e)
 		}
-		if rep := strings.TrimSpace(f.Report); rep != "" {
+		rep := strings.TrimSpace(f.Report)
+		if rep == "" && !includeTraffic {
+			// Word 模板的「漏洞描述」来自详细报告；没有详细报告时用概述补位。
+			if summary := strings.TrimSpace(f.Summary); summary != "" {
+				rep = "## 概述\n\n" + summary
+			}
+		}
+		if rep != "" {
 			b.WriteString("**详细报告：**\n\n")
 			b.WriteString(rep)
 			b.WriteString("\n\n")
 		}
-		b.WriteString(findingTrafficMarkdown(f, false))
+		if includeTraffic {
+			b.WriteString(findingTrafficMarkdown(f, false))
+		}
 		b.WriteString("---\n\n")
 	}
 	return b.String()

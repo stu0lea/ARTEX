@@ -1,0 +1,791 @@
+package md2docx
+
+import (
+	"archive/zip"
+	"bytes"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writePNG(t *testing.T, path string, w, h int) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{R: 12, G: 34, B: 56, A: 255})
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// testTemplate 读取仓库内置的公开模板。md2docx 自身不内嵌模板，
+// 由 reportenhance 或命令行工具负责选择模板。
+func testTemplate(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "assets", "report-template-public.docx"))
+	if err != nil {
+		t.Fatalf("读取公开模板失败: %v", err)
+	}
+	return b
+}
+
+const sampleFinding = "# [HIGH] SQL 注入\n\n" +
+	"- **类别**：SQL注入\n" +
+	"- **严重等级**：high\n" +
+	"- **所属任务**：某单位门户网站渗透测试\n" +
+	"- **发现时间**：2026-11-01 10:00:00\n\n" +
+	"## 概述\n\n简要说明。\n\n" +
+	"## 详细报告\n\n" +
+	"# 登录接口 SQL 注入\n\n" +
+	"- **类型**：SQL注入\n" +
+	"- **等级**：高危\n\n" +
+	"## 概述\n\n登录接口 http://example.com/login 的 `username` 参数存在注入。\n\n" +
+	"## 影响与危害\n\n可能导致登录绕过。\n\n" +
+	"## 受影响范围\n\n全部登录用户。\n\n" +
+	"## 复现步骤\n\n1. 访问登录页\n2. 提交 payload\n\n" +
+	"| 参数 | 值 |\n| --- | --- |\n| username | `' or 1=1--` |\n\n" +
+	"## 证据\n\n```http\nPOST /login HTTP/1.1\nHost: example.com\n```\n\n" +
+	"![注入回显](shot.png)\n\n" +
+	"## PoC\n\n```text\n' or 1=1--\n```\n\n" +
+	"## 根因分析\n\nSQL 语句直接拼接。\n\n" +
+	"## 修复建议\n\n使用参数化查询，参考 `PreparedStatement`。\n\n" +
+	"## 附：补充说明\n\n修复后需要回归验证。\n"
+
+func TestFromMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	shot := filepath.Join(dir, "shot.png")
+	writePNG(t, shot, 40, 20)
+
+	data := FromMarkdown(sampleFinding, dir, ConvertOptions{})
+	if data.ProjectName != "某单位门户网站渗透测试" {
+		t.Fatalf("project = %q", data.ProjectName)
+	}
+	if data.DateCN != "2026年11月1日" {
+		t.Fatalf("date = %q", data.DateCN)
+	}
+	if len(data.Systems) != 1 || len(data.Systems[0].Vulns) != 1 {
+		t.Fatalf("systems = %+v", data.Systems)
+	}
+	v := data.Systems[0].Vulns[0]
+	if v.Title != "SQL 注入" || v.Severity != "高危" {
+		t.Fatalf("vuln = %+v", v)
+	}
+	if v.Location != "http://example.com/login" {
+		t.Fatalf("location = %q", v.Location)
+	}
+	joined := strings.Join(v.Desc, "\n")
+	for _, want := range []string{
+		headSentinel + "概述",
+		headSentinel + "影响与危害",
+		headSentinel + "受影响范围",
+		headSentinel + "PoC",
+		headSentinel + "根因分析",
+		"可能导致登录绕过",
+		codeSentinel + "POST /login",
+		tableSentinel,
+		inlineCodeStart + "username" + inlineCodeEnd,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("desc missing %q:\n%s", want, joined)
+		}
+	}
+	order := []string{"概述", "影响与危害", "受影响范围", "复现步骤", "证据", "PoC", "根因分析"}
+	last := -1
+	for _, name := range order {
+		idx := strings.Index(joined, headSentinel+name)
+		if idx < 0 || idx <= last {
+			t.Fatalf("section %q out of order:\n%s", name, joined)
+		}
+		last = idx
+	}
+	if len(v.Shots) != 1 || !strings.HasSuffix(v.Shots[0].Path, "shot.png") {
+		t.Fatalf("shots = %+v", v.Shots)
+	}
+	if !strings.HasPrefix(v.Shots[0].Caption, captionSentinel) {
+		t.Fatalf("caption = %q", v.Shots[0].Caption)
+	}
+	after := strings.Join(v.After, "\n")
+	if len(v.After) == 0 || v.After[0] != headSentinel+"漏洞建议" {
+		t.Fatalf("missing fix label: %+v", v.After)
+	}
+	if strings.Contains(after, headSentinel+"修复建议") {
+		t.Fatalf("fix heading should be dropped: %s", after)
+	}
+	if !strings.Contains(after, inlineCodeStart+"PreparedStatement"+inlineCodeEnd) ||
+		!strings.Contains(after, "修复后需要回归验证") {
+		t.Fatalf("after = %q", after)
+	}
+}
+
+func TestParseEmptySummaryReport(t *testing.T) {
+	md := "# 漏洞发现汇总报告\n\n## 摘要\n\n_无匹配的漏洞。_\n\n## 漏洞明细\n"
+	data := FromMarkdown(md, "", ConvertOptions{Project: "p", Date: "2026年11月12日"})
+	if data.Total != 0 || data.Critical != 0 || data.High != 0 || data.Medium != 0 || data.Low != 0 {
+		t.Fatalf("empty summary counts = %+v", data)
+	}
+	if len(data.Systems) != 0 || len(data.Groups) != 0 {
+		t.Fatalf("empty summary should have no systems/groups: %+v", data)
+	}
+	if data.Risk != "良好状态" {
+		t.Fatalf("risk = %q", data.Risk)
+	}
+}
+
+func TestPublicTemplateIsNeutral(t *testing.T) {
+	files := unzip(t, testTemplate(t))
+	for name := range files {
+		if strings.HasPrefix(name, "word/media/") {
+			t.Fatalf("公开模板不应包含图片: %s", name)
+		}
+	}
+	doc := string(files["word/document.xml"])
+	for _, bad := range []string{"天融信", "Topsec", "TopScanner"} {
+		if strings.Contains(doc, bad) {
+			t.Fatalf("公开模板仍包含公司标识 %q", bad)
+		}
+	}
+	for _, want := range []string{"{{ project_name }}", "{{ critical }}", "groups[0]"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("公开模板缺少标签 %q", want)
+		}
+	}
+}
+
+func TestRenderPublicTemplate(t *testing.T) {
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "shot.png"), 60, 30)
+	data := FromMarkdown(sampleFinding, dir, ConvertOptions{})
+
+	out, err := Render(testTemplate(t), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := unzip(t, out)
+	doc := files["word/document.xml"]
+	if doc == nil {
+		t.Fatal("missing document.xml")
+	}
+	if err := ValidateXML(doc); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	text := string(doc)
+	for _, bad := range []string{"{{", "{%", "}}", "%}"} {
+		if strings.Contains(text, bad) {
+			t.Fatalf("template tag left in document: %s", bad)
+		}
+	}
+	for _, want := range []string{"某单位门户网站渗透测试", "SQL 注入", "高危", "图 1  注入回显", "<w:tbl>"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("document missing %q", want)
+		}
+	}
+	if _, ok := files["word/media/image1.png"]; !ok {
+		t.Fatalf("image media missing, files=%v", keys(files))
+	}
+	rels := string(files["word/_rels/document.xml.rels"])
+	if !strings.Contains(rels, "relationships/image") || !strings.Contains(rels, "media/image1.png") {
+		t.Fatalf("image relationship missing: %s", rels)
+	}
+	if !strings.Contains(string(files["[Content_Types].xml"]), `Extension="png"`) {
+		t.Fatal("png content type missing")
+	}
+	for name, b := range files {
+		if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".rels") {
+			if err := ValidateXML(b); err != nil {
+				t.Fatalf("%s invalid: %v", name, err)
+			}
+		}
+	}
+}
+
+func TestConvertInMemory(t *testing.T) {
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "shot.png"), 60, 30)
+
+	out, err := Convert(sampleFinding, dir, ConvertOptions{}, testTemplate(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := unzip(t, out)
+	doc := files["word/document.xml"]
+	if doc == nil {
+		t.Fatal("missing document.xml")
+	}
+	if err := ValidateXML(doc); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	for _, want := range []string{"SQL 注入", "可能导致登录绕过", "高危"} {
+		if !strings.Contains(string(doc), want) {
+			t.Fatalf("document missing %q", want)
+		}
+	}
+	if _, ok := files["word/media/image1.png"]; !ok {
+		t.Fatalf("image media missing, files=%v", keys(files))
+	}
+}
+
+func TestPublicTemplateRenders(t *testing.T) {
+	tpl := testTemplate(t)
+	if len(tpl) == 0 {
+		t.Fatal("public template is empty")
+	}
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "shot.png"), 60, 30)
+	out, err := Convert(sampleFinding, dir, ConvertOptions{}, tpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := unzip(t, out)
+	doc := string(files["word/document.xml"])
+	if err := ValidateXML([]byte(doc)); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	for _, want := range []string{"安全漏洞名称", "SQL 注入", "脆弱性评价"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("public template output missing %q", want)
+		}
+	}
+}
+
+func TestRenderEscapesMarkup(t *testing.T) {
+	data := &DocData{
+		ProjectName: `<script>&"test"`,
+		DateCN:      "2026年11月10日",
+		Total:       1,
+		High:        1,
+		Risk:        "预警状态",
+		Systems: []System{{Name: "a<&b", Vulns: []Vuln{{
+			Title:    `<b>标题</b>`,
+			Location: "http://x/?a=1&b=2",
+			Desc:     []string{`正文 <br> & 符号`},
+			Severity: "高危",
+		}}}},
+		Scope:  []ScopeRow{{Name: "a<&b", URL: "http://x/?a=1&b=2"}},
+		Groups: []Group{{Name: "SQL<注入>", Count: 1, Severity: "高危"}},
+	}
+	out, err := Render(testTemplate(t), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(unzip(t, out)["word/document.xml"])
+	if err := ValidateXML([]byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc, "&lt;script&gt;&amp;") {
+		t.Fatal("dynamic text was not escaped")
+	}
+}
+
+func TestRenderStripsInvalidXMLChars(t *testing.T) {
+	md := "# [HIGH] 控制字符测试\n\n" +
+		"## 详细报告\n\n" +
+		"# 控制字符测试\n\n" +
+		"## 概述\n\n正常文本\x03包含控制字符\x1b，以及制表符\t和换行。\n\n" +
+		"| 参数 | 值 |\n| --- | --- |\n| a | b\x02c |\n"
+
+	out, err := Convert(md, t.TempDir(), ConvertOptions{}, testTemplate(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := unzip(t, out)
+	doc := files["word/document.xml"]
+	if err := ValidateXML(doc); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	if strings.ContainsAny(string(doc), "\x02\x03\x1b") {
+		t.Fatal("control characters left in document.xml")
+	}
+	for _, want := range []string{"正常文本包含控制字符", "bc"} {
+		if !strings.Contains(string(doc), want) {
+			t.Fatalf("document missing %q", want)
+		}
+	}
+}
+
+func TestRenderSkipsMissingImage(t *testing.T) {
+	data := &DocData{
+		ProjectName: "p",
+		Systems: []System{{Vulns: []Vuln{{
+			Title: "t",
+			Shots: []Shot{{Path: filepath.Join(t.TempDir(), "missing.png"), Caption: captionSentinel + "图"}},
+		}}}},
+	}
+	out, err := Render(testTemplate(t), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := unzip(t, out)
+	if got, want := mediaCount(files), mediaCount(unzip(t, testTemplate(t))); got != want {
+		t.Fatalf("unexpected media for missing image: got %d, want %d", got, want)
+	}
+	if strings.Contains(string(files["word/document.xml"]), "{{") {
+		t.Fatal("leftover tag")
+	}
+}
+
+func mediaCount(files map[string][]byte) int {
+	n := 0
+	for name := range files {
+		if strings.HasPrefix(name, "word/media/") && !strings.HasSuffix(name, "/") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestExpressions(t *testing.T) {
+	data := &DocData{
+		Total:  2,
+		Groups: []Group{{Name: "SQL注入", Count: 2, Severity: "高危"}},
+		Scope:  []ScopeRow{{Name: "门户", URL: "http://example.com"}},
+		Systems: []System{{Vulns: []Vuln{{
+			Title: "t",
+			Desc:  []string{"a"},
+			After: []string{"b"},
+		}}}},
+	}
+	ctx := newValueCtx(data)
+	ctx = ctx.child("v", data.Systems[0].Vulns[0])
+	cases := map[string]string{
+		`groups[0].name if groups|length > 0 else ""`: "SQL注入",
+		`groups[3].name if groups|length > 3 else ""`: "",
+		`scope[0].url`: "http://example.com",
+		`v.title`:      "t",
+		`total`:        "2",
+		`"固定"`:         "固定",
+	}
+	for expr, want := range cases {
+		if got := displayValue(ctx.eval(expr)); got != want {
+			t.Fatalf("eval %q = %q, want %q", expr, got, want)
+		}
+	}
+	if !truthy(ctx.eval("v.after")) {
+		t.Fatal("non-empty after should be truthy")
+	}
+	ctx = ctx.child("v", Vuln{Title: "x"})
+	if truthy(ctx.eval("v.after")) {
+		t.Fatal("empty after should be falsy")
+	}
+}
+
+func TestControlBlocks(t *testing.T) {
+	p := func(text string) bodyNode {
+		return bodyNode{kind: nodeParagraph, xml: `<w:p><w:r><w:t>` + text + `</w:t></w:r></w:p>`}
+	}
+	withAfter := []bodyNode{
+		p(`{%p if v.after %}`), p("HAS-AFTER"), p(`{%p endif %}`),
+	}
+	r := &renderer{pkg: &docxPackage{}}
+	ctx := newValueCtx(&DocData{})
+	ctx = ctx.child("v", Vuln{After: []string{"x"}})
+	out, err := r.renderNodes(withAfter, ctx)
+	if err != nil || !strings.Contains(out, "HAS-AFTER") {
+		t.Fatalf("if-true failed: %q err=%v", out, err)
+	}
+	ctx = ctx.child("v", Vuln{})
+	out, err = r.renderNodes(withAfter, ctx)
+	if err != nil || strings.Contains(out, "HAS-AFTER") {
+		t.Fatalf("if-false failed: %q err=%v", out, err)
+	}
+
+	forLoop := []bodyNode{
+		p(`{%p for p in v.desc %}`), p("D: {{ p }}"), p(`{%p endfor %}`),
+	}
+	ctx = ctx.child("v", Vuln{Desc: []string{"甲", "乙"}})
+	out, err = r.renderNodes(forLoop, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, "D: ") != 2 || !strings.Contains(out, ">甲<") || !strings.Contains(out, ">乙<") {
+		t.Fatalf("for loop failed: %q", out)
+	}
+}
+
+func TestReplaceTagsInTable(t *testing.T) {
+	data := &DocData{Groups: []Group{{Name: "SQL注入", Count: 2, Severity: "高危"}}}
+	ctx := newValueCtx(data)
+	cell := `<w:tc><w:p><w:r><w:t>{{ groups[0].name if groups|length > 0 else "" }}</w:t></w:r></w:p></w:tc>`
+	out := replaceTagsInXML(cell, ctx)
+	if !strings.Contains(out, "SQL注入") || strings.Contains(out, "{{") {
+		t.Fatalf("table tag replacement failed: %s", out)
+	}
+}
+
+func TestBuildTableUsesEvenFixedWidths(t *testing.T) {
+	out := buildTable([][]string{
+		{"接口", "方法", "关键参数", "危害"},
+		{"/api/WebOrderFiles/GetFileInfosV2", "GET", "pathEncrypt", "任意目录枚举（绝对路径 / 相对路径 / UNC / 设备前缀）"},
+	})
+	if !strings.Contains(out, `<w:tblLayout w:type="fixed"/>`) {
+		t.Fatalf("table must use fixed layout:\n%s", out)
+	}
+	if strings.Contains(out, `w:type="autofit"`) {
+		t.Fatalf("table must not use autofit:\n%s", out)
+	}
+	if got := strings.Count(out, `<w:gridCol w:w="2250"/>`); got != 4 {
+		t.Fatalf("grid columns = %d, want 4 equal columns:\n%s", got, out)
+	}
+	if got := strings.Count(out, `<w:tcW w:w="2250" w:type="dxa"/>`); got != 8 {
+		t.Fatalf("cell widths = %d, want 8 equal cells:\n%s", got, out)
+	}
+	if strings.Contains(out, `w:sz w:val="24"`) {
+		t.Fatalf("table text must not use 12pt:\n%s", out)
+	}
+	if got := strings.Count(out, `w:sz w:val="21"`); got != 8 {
+		t.Fatalf("table 10.5pt runs = %d, want 8:\n%s", got, out)
+	}
+}
+
+const sampleSummary = "# 漏洞发现汇总报告\n\n" +
+	"- **生成时间**：2026-11-10 13:56:06\n" +
+	"- **发现总数**：2 个\n\n" +
+	"## 摘要\n\n" +
+	"| 严重等级 | 数量 |\n| --- | --- |\n| 严重 | 1 |\n| 高危 | 0 |\n| 中危 | 1 |\n| 低危 | 0 |\n\n" +
+	"## 漏洞明细\n\n" +
+	"### 1. [CRITICAL] a.example.com 未授权访问\n\n" +
+	"- **类别**：未授权访问\n" +
+	"- **状态**：已确认\n" +
+	"- **所属任务**：https://a.example.com/\n" +
+	"- **发现时间**：2026-11-09 10:00:00\n\n" +
+	"匿名即可访问。\n\n" +
+	"**证据：**\n\n```text\nGET /admin\n```\n\n" +
+	"**详细报告：**\n\n" +
+	"# 未授权访问\n\n" +
+	"- **所属任务**：https://a.example.com/\n\n" +
+	"## 概述\n\n后台 http://a.example.com/admin 可匿名访问。\n\n" +
+	"## 复现步骤\n\n1. 打开后台\n\n" +
+	"## 证据\n\n```http\nGET /admin HTTP/1.1\nHost: a.example.com\n```\n\n" +
+	"## 修复建议\n\n增加鉴权。\n\n" +
+	"### 2. [MEDIUM] b.example.com SQL 注入\n\n" +
+	"- **类别**：SQL注入\n" +
+	"- **状态**：已确认\n" +
+	"- **所属任务**：https://b.example.com/\n" +
+	"- **发现时间**：2026-11-09 11:00:00\n\n" +
+	"**详细报告：**\n\n" +
+	"## 概述\n\nhttp://b.example.com/item?id=1 存在注入。\n\n" +
+	"## 复现步骤\n\n1. 修改 id\n\n" +
+	"## 证据\n\n```text\n### 9. [HIGH] 这段在代码块里，不是漏洞\npayload\n```\n\n" +
+	"## 修复建议\n\n参数化查询。\n"
+
+func TestFromSummaryMarkdown(t *testing.T) {
+	data := FromMarkdown(sampleSummary, t.TempDir(), ConvertOptions{})
+	if data.Total != 2 || data.Critical != 1 || data.High != 0 || data.Medium != 1 || data.Low != 0 {
+		t.Fatalf("counts = total:%d critical:%d high:%d medium:%d low:%d", data.Total, data.Critical, data.High, data.Medium, data.Low)
+	}
+	if data.ProjectName != "a.example.com" {
+		t.Fatalf("project = %q", data.ProjectName)
+	}
+	if data.DateCN != "2026年11月10日" {
+		t.Fatalf("date = %q", data.DateCN)
+	}
+	if data.Risk != "严重状态" {
+		t.Fatalf("risk = %q", data.Risk)
+	}
+	if len(data.Systems) != 2 {
+		t.Fatalf("systems = %+v", data.Systems)
+	}
+	if data.Systems[0].Name != "a.example.com" || data.Systems[1].Name != "b.example.com" {
+		t.Fatalf("system order = %+v", data.Systems)
+	}
+	if len(data.Groups) != 2 || data.Groups[0].Name != "未授权访问" || data.Groups[0].Count != 1 {
+		t.Fatalf("groups = %+v", data.Groups)
+	}
+	v := data.Systems[0].Vulns[0]
+	if v.Title != "a.example.com 未授权访问" || v.Severity != "严重" {
+		t.Fatalf("vuln = %+v", v)
+	}
+	if v.Location != "http://a.example.com/admin" {
+		t.Fatalf("location = %q", v.Location)
+	}
+	if !strings.Contains(strings.Join(v.Desc, "\n"), headSentinel+"概述") {
+		t.Fatalf("desc = %+v", v.Desc)
+	}
+	if !strings.Contains(strings.Join(v.After, "\n"), "增加鉴权") {
+		t.Fatalf("after = %+v", v.After)
+	}
+}
+
+func TestSummaryRender(t *testing.T) {
+	data := FromMarkdown(sampleSummary, t.TempDir(), ConvertOptions{})
+	out, err := Render(testTemplate(t), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(unzip(t, out)["word/document.xml"])
+	if err := ValidateXML([]byte(doc)); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	for _, bad := range []string{"{{", "{%", "}}", "%}"} {
+		if strings.Contains(doc, bad) {
+			t.Fatalf("template tag left in document: %s", bad)
+		}
+	}
+	for _, want := range []string{"a.example.com 未授权访问", "b.example.com SQL 注入"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("document missing %q", want)
+		}
+	}
+}
+
+func TestRenderPublicTemplateSummary(t *testing.T) {
+	tpl := testTemplate(t)
+	data := FromMarkdown(sampleSummary, t.TempDir(), ConvertOptions{})
+	out, err := Render(tpl, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := unzip(t, out)
+	doc := string(files["word/document.xml"])
+	if err := ValidateXML([]byte(doc)); err != nil {
+		t.Fatalf("document.xml invalid: %v", err)
+	}
+	for _, bad := range []string{"{{", "{%", "}}", "%}"} {
+		if strings.Contains(doc, bad) {
+			t.Fatalf("template tag left in document: %s", bad)
+		}
+	}
+	for _, want := range []string{
+		"a.example.com 未授权访问",
+		"b.example.com SQL 注入",
+		"未授权访问",
+		"SQL注入",
+		"a.example.com/admin",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("document missing %q", want)
+		}
+	}
+}
+
+func TestRenderExpandsGroupTable(t *testing.T) {
+	severities := []string{"严重", "高危", "高危", "中危", "低危", "信息", "高危", "中危"}
+	for _, count := range []int{1, 3, 4, 5, 8} {
+		t.Run(fmt.Sprintf("%d_groups", count), func(t *testing.T) {
+			groups := make([]Group, count)
+			for i := 0; i < count; i++ {
+				groups[i] = Group{
+					Name:     fmt.Sprintf("类别%02d", i+1),
+					Count:    i + 1,
+					Severity: severities[i%len(severities)],
+				}
+			}
+			data := &DocData{
+				ProjectName: "p",
+				DateCN:      "2026年11月10日",
+				Total:       count,
+				High:        count,
+				Risk:        "严重状态",
+				Scope:       []ScopeRow{{Name: "p", URL: "http://p.example"}},
+				Groups:      groups,
+			}
+			out, err := Render(testTemplate(t), data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := string(unzip(t, out)["word/document.xml"])
+			if err := ValidateXML([]byte(doc)); err != nil {
+				t.Fatalf("document.xml invalid: %v", err)
+			}
+			tbl := groupSummaryTable(t, doc)
+			wantRows := count + 1
+			if wantRows < 5 {
+				wantRows = 5
+			}
+			if got := tableRowCount(tbl); got != wantRows {
+				t.Fatalf("summary table rows = %d, want %d", got, wantRows)
+			}
+			for _, g := range groups {
+				if !strings.Contains(tbl, g.Name) {
+					t.Fatalf("expanded group table missing %q:\n%s", g.Name, tbl)
+				}
+			}
+			if strings.Contains(tbl, "{{") || strings.Contains(tbl, "{%") {
+				t.Fatalf("template tag left after group expansion:\n%s", tbl)
+			}
+		})
+	}
+}
+
+// tableRowCount 只统计真正的行元素，避免把 w:trPr / w:trHeight / w:tr2bl 误算进去。
+func tableRowCount(tbl string) int {
+	return strings.Count(tbl, "<w:tr>") + strings.Count(tbl, "<w:tr ")
+}
+
+// groupSummaryTable 取出「漏洞汇总如下」后面的分类汇总表。
+func groupSummaryTable(t *testing.T, doc string) string {
+	t.Helper()
+	marker := strings.Index(doc, "安全漏洞名称")
+	if marker < 0 {
+		t.Fatal("group summary table header not found")
+	}
+	start := strings.LastIndex(doc[:marker], "<w:tbl>")
+	if start < 0 {
+		t.Fatal("group summary table start not found")
+	}
+	end := findElementEnd(doc, start, "w:tbl")
+	if end < 0 {
+		t.Fatal("group summary table end not found")
+	}
+	return doc[start:end]
+}
+
+func TestFromMarkdownCriticalCountsSeparately(t *testing.T) {
+	md := "# [CRITICAL] 严重漏洞\n\n" +
+		"- **类别**：未授权访问\n" +
+		"- **严重等级**：critical\n" +
+		"- **发现时间**：2026-11-10 10:00:00\n\n" +
+		"## 概述\n\nhttp://critical.example.com/admin 可匿名访问。\n"
+	data := FromMarkdown(md, t.TempDir(), ConvertOptions{})
+	if data.Total != 1 || data.Critical != 1 || data.High != 0 || data.Medium != 0 || data.Low != 0 {
+		t.Fatalf("counts = total:%d critical:%d high:%d medium:%d low:%d", data.Total, data.Critical, data.High, data.Medium, data.Low)
+	}
+	if data.Risk != "严重状态" {
+		t.Fatalf("risk = %q", data.Risk)
+	}
+}
+
+func TestRenderSeveritySummaryIncludesCritical(t *testing.T) {
+	data := &DocData{
+		ProjectName: "p",
+		DateCN:      "2026年11月10日",
+		Total:       4,
+		Critical:    1,
+		High:        1,
+		Medium:      1,
+		Low:         1,
+		Risk:        "严重状态",
+		Groups:      []Group{{Name: "严重漏洞", Count: 1, Severity: "严重"}},
+	}
+	out, err := Render(testTemplate(t), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(unzip(t, out)["word/document.xml"])
+	summary := paragraphTextContaining(t, doc, "经安全服务团队测试")
+	for _, want := range []string{"共发现4处安全漏洞", "严重1个", "高危1个", "中危1个", "低危1个"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("severity summary missing %q: %s", want, summary)
+		}
+	}
+	overview := paragraphTextContaining(t, doc, "本次渗透测试主要采用")
+	if !strings.Contains(overview, "存在漏洞严重1个，高危1个，中危1个，低危1个") {
+		t.Fatalf("overview severity summary missing critical: %s", overview)
+	}
+	if strings.Contains(doc, "{{ critical }}") {
+		t.Fatal("critical tag left in document")
+	}
+}
+
+func paragraphTextContaining(t *testing.T, doc, marker string) string {
+	t.Helper()
+	i := strings.Index(doc, marker)
+	if i < 0 {
+		t.Fatalf("paragraph marker %q not found", marker)
+	}
+	start := strings.LastIndex(doc[:i], "<w:p ")
+	if start < 0 {
+		t.Fatalf("paragraph start for %q not found", marker)
+	}
+	end := findElementEnd(doc, start, "w:p")
+	if end < 0 {
+		t.Fatalf("paragraph end for %q not found", marker)
+	}
+	return paragraphText(doc[start:end])
+}
+
+func TestProjectLabelPrefersSpecificHost(t *testing.T) {
+	meta := "- **所属任务**：http://m.example.com\nhttps://app.example.com\n"
+	got := projectLabel(meta, "http://m.example.com", "app.example.com 漏洞", "访问 https://app.example.com/x")
+	if got != "app.example.com" {
+		t.Fatalf("project = %q", got)
+	}
+}
+
+func unzip(t *testing.T, b []byte) map[string][]byte {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string][]byte{}
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[f.Name] = data
+	}
+	return out
+}
+
+func keys(m map[string][]byte) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func TestPublicTemplateFillsApprovalDates(t *testing.T) {
+	data := &DocData{ProjectName: "项目", DateCN: "2026年11月10日"}
+	out, err := Render(testTemplate(t), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(unzip(t, out)["word/document.xml"])
+	for _, label := range []string{"审批日期", "批准日期"} {
+		got, ok := nextTextAfter(doc, label)
+		if !ok {
+			t.Fatalf("%s cell not found", label)
+		}
+		if got != data.DateCN {
+			t.Fatalf("%s = %q, want %q", label, got, data.DateCN)
+		}
+	}
+}
+
+// nextTextAfter 返回标记文字之后第一个 <w:t> 的文本，用于检查表格相邻单元格。
+func nextTextAfter(s, marker string) (string, bool) {
+	i := strings.Index(s, marker)
+	if i < 0 {
+		return "", false
+	}
+	rest := s[i+len(marker):]
+	j := strings.Index(rest, "<w:t>")
+	if k := strings.Index(rest, "<w:t "); k >= 0 && (j < 0 || k < j) {
+		j = k
+	}
+	if j < 0 {
+		return "", false
+	}
+	rest = rest[j:]
+	k := strings.IndexByte(rest, '>')
+	if k < 0 {
+		return "", false
+	}
+	rest = rest[k+1:]
+	e := strings.Index(rest, "</w:t>")
+	if e < 0 {
+		return "", false
+	}
+	return rest[:e], true
+}

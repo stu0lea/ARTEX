@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/reportenhance"
@@ -23,7 +24,7 @@ func (s *Server) reportManager() *reportenhance.Manager {
 	if v, ok := reportManagers.Load(dir); ok {
 		return v.(*reportenhance.Manager)
 	}
-	m := reportenhance.NewManager(dir, reportenhance.NewRenderer(os.TempDir()))
+	m := reportenhance.NewManager(dir)
 	actual, _ := reportManagers.LoadOrStore(dir, m)
 	return actual.(*reportenhance.Manager)
 }
@@ -45,23 +46,12 @@ func (s *Server) generateReportDocx(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	store := s.evidenceStore()
-	if err := store.StageFindingsExport(r.Context(), findings, "", false); err != nil {
-		evidenceError(w, err)
-		return
-	}
-	assets := s.resolveFindingAssets(findings)
-	opts := reportenhance.BuildOptions{
-		TaskID:   tid,
+	opts := reportenhance.GenerateOptions{
 		TaskDesc: t.Description,
-		TaskDir:  filepath.Join(s.m.dir, "tasks", t.ID),
-		ShotDir:  filepath.Join(s.m.dir, "reports", t.ID, "shots"),
-		Store:    store,
-		Renderer: reportenhance.NewRenderer(os.TempDir()),
-		Assets:   assets,
+		Date:     time.Now().Format("2006年1月2日"),
 	}
-	job := s.reportManager().Start(tid, func(ctx context.Context) (*reportenhance.DocData, error) {
-		return reportenhance.Build(ctx, opts, findings), nil
+	job := s.reportManager().Start(tid, func(ctx context.Context) ([]byte, error) {
+		return reportenhance.Generate(ctx, opts, findings)
 	})
 	writeJSON(w, 200, job)
 }

@@ -14,5 +14,7 @@ bench/.env
 bench/scheduler.py
 bench/entrypoint_v2.sh
 bench/seed_v2.sh
-# 客户 Word 报告模板（本地运行时挂载，不进入镜像构建上下文）
+# 内部 Word 报告模板（本地运行时挂载，不进入镜像构建上下文）
 reportenhance/assets/report-template-auto.docx
+reportenhance/assets/report-template.docx
+reportenhance/md2docx/assets/report-template.docx

@@ -3,22 +3,16 @@ package reportenhance
 import (
 	"context"
 	"crypto/rand"
-	"embed"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
-
-//go:embed assets/render.py assets/report-template-fallback.docx
-var assets embed.FS
 
 // Job 是一次 Word 生成任务的状态快照。
 type Job struct {
@@ -31,29 +25,29 @@ type Job struct {
 	Finished time.Time `json:"finished_at,omitempty"`
 }
 
-// Manager 串行执行同任务的生成任务，重复点击直接复用正在跑的 job。
-// 截图与 Python 渲染都很慢，HTTP handler 必须立即返回，否则会撞网关超时。
+// Manager 执行异步生成任务，同一任务重复提交时复用正在运行的 job。
 type Manager struct {
-	mu       sync.Mutex
-	jobs     map[int64]*Job
-	dir      string
-	renderer *Renderer
-	timeout  time.Duration
+	mu      sync.Mutex
+	jobs    map[int64]*Job
+	dir     string
+	timeout time.Duration
 }
 
-func NewManager(dir string, r *Renderer) *Manager {
-	return &Manager{jobs: map[int64]*Job{}, dir: dir, renderer: r, timeout: 15 * time.Minute}
+func NewManager(dir string) *Manager {
+	return &Manager{jobs: map[int64]*Job{}, dir: dir, timeout: 15 * time.Minute}
 }
 
-// Start 启动异步生成；build 负责截图与数据组装，失败只影响这份报告。
-func (m *Manager) Start(taskID int64, build func(ctx context.Context) (*DocData, error)) *Job {
+// Start 启动异步生成；render 产出的 docx 字节由 Manager 负责落盘。
+func (m *Manager) Start(taskID int64, render func(ctx context.Context) ([]byte, error)) *Job {
 	m.mu.Lock()
 	if j := m.jobs[taskID]; j != nil && j.State == "running" {
+		cp := *j
 		m.mu.Unlock()
-		return j
+		return &cp
 	}
 	j := &Job{ID: newID(), TaskID: taskID, State: "running", Started: time.Now()}
 	m.jobs[taskID] = j
+	snapshot := *j
 	m.mu.Unlock()
 
 	go func() {
@@ -66,19 +60,49 @@ func (m *Manager) Start(taskID int64, build func(ctx context.Context) (*DocData,
 		ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 		defer cancel()
 
-		data, err := build(ctx)
+		b, err := render(ctx)
 		if err != nil {
 			m.finish(j, "", err)
 			return
 		}
-		out := filepath.Join(m.dir, fmt.Sprintf("%d", taskID), j.ID+".docx")
-		if err = m.Render(ctx, data, out); err != nil {
+		if len(b) == 0 {
+			m.finish(j, "", fmt.Errorf("生成 Word 失败: 输出为空"))
+			return
+		}
+		out, err := m.writeReport(taskID, j.ID, b)
+		if err != nil {
 			m.finish(j, "", err)
 			return
 		}
 		m.finish(j, out, nil)
 	}()
-	return j
+	return &snapshot
+}
+
+// writeReport 先写临时文件再改名，避免进程中断留下半份 docx。
+func (m *Manager) writeReport(taskID int64, jobID string, b []byte) (string, error) {
+	dir := filepath.Join(m.dir, strconv.FormatInt(taskID, 10))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(dir, ".report-*.docx")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	out := filepath.Join(dir, jobID+".docx")
+	if err := os.Rename(tmpName, out); err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 func (m *Manager) finish(j *Job, file string, err error) {
@@ -115,7 +139,7 @@ func (m *Manager) Status(taskID int64) *Job {
 
 // latestReport 查找 data/reports/<task>/ 下修改时间最新的 docx。
 func (m *Manager) latestReport(taskID int64) (*Job, bool) {
-	matches, err := filepath.Glob(filepath.Join(m.dir, fmt.Sprintf("%d", taskID), "*.docx"))
+	matches, err := filepath.Glob(filepath.Join(m.dir, strconv.FormatInt(taskID, 10), "*.docx"))
 	if err != nil || len(matches) == 0 {
 		return nil, false
 	}
@@ -137,85 +161,10 @@ func (m *Manager) latestReport(taskID int64) (*Job, bool) {
 	return &Job{ID: id, TaskID: taskID, State: "done", File: best, Started: bestMod, Finished: bestMod}, true
 }
 
-// templateBytes 返回本次渲染使用的模板：优先 ARTEX_REPORT_TEMPLATE 指向的
-// 运行时模板（容器里挂载仓库中的 docx，改完下次生成即生效），否则回退到
-// 编译进二进制的内置模板。
-func (m *Manager) templateBytes() ([]byte, string, error) {
-	if p := strings.TrimSpace(os.Getenv("ARTEX_REPORT_TEMPLATE")); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return b, p, nil
-		} else {
-			log.Printf("[reportenhance] 读取运行时模板 %s 失败，回退内置模板: %v", p, err)
-		}
-	}
-	b, err := assets.ReadFile("assets/report-template-fallback.docx")
-	return b, "embedded", err
-}
-
-// Render 调用镜像内的 Python + docxtpl 把数据套进客户模板。
-func (m *Manager) Render(ctx context.Context, data *DocData, out string) error {
-	python := os.Getenv("PYTHON_BIN")
-	if python == "" {
-		python = "python3"
-	}
-	if _, err := exec.LookPath(python); err != nil {
-		return errors.New("镜像内未安装 python3，无法生成 Word")
-	}
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		return err
-	}
-	stage, err := os.MkdirTemp(m.dir, "stage-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(stage)
-
-	py, err := assets.ReadFile("assets/render.py")
-	if err != nil {
-		return err
-	}
-	tpl, tplPath, err := m.templateBytes()
-	if err != nil {
-		return err
-	}
-	if tplPath != "embedded" {
-		log.Printf("[reportenhance] 使用运行时 Word 模板: %s", tplPath)
-	}
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	files := map[string][]byte{
-		"render.py":     py,
-		"template.docx": tpl,
-		"data.json":     raw,
-	}
-	for name, b := range files {
-		if err = os.WriteFile(filepath.Join(stage, name), b, 0o600); err != nil {
-			return err
-		}
-	}
-
-	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, python,
-		filepath.Join(stage, "render.py"),
-		"--template", filepath.Join(stage, "template.docx"),
-		"--data", filepath.Join(stage, "data.json"),
-		"--out", out)
-	if msg, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("Word 渲染失败: %v: %s", err, truncateRunes(string(msg), 600))
-	}
-	if fi, err := os.Stat(out); err != nil || fi.Size() == 0 {
-		return errors.New("Word 渲染失败: 未生成输出文件")
-	}
-	return nil
-}
-
 func newID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		return strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 	return hex.EncodeToString(b[:])
 }

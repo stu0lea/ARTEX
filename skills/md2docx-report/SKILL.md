@@ -15,7 +15,7 @@ description: 把 ARTEX「发现 → 导出报告」的 Markdown 转成客户模�
 从 zip 上传安装时执行位会丢，首次运行若报 `Permission denied`，先
 `chmod +x /app/skills/md2docx-report/bin/md2docx` 一次即可。
 
-模板已放在二进制同目录的 `report-template.docx`，无需额外指定。
+二进制内置公开模板（不含公司名称和 logo），无需额外指定；需要内部模板时用 `-template` 或 `ARTEX_REPORT_TEMPLATE` 覆盖。
 
 ## 用法
 
