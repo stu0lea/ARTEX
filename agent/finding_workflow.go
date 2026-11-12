@@ -69,7 +69,6 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 		if has["add_task_hint"] && !has["add_hint"] {
 			guidance += "\n平台对话没有任务上下文时，不直接调用 report_finding；通过 add_task_hint 向已有对应任务交接，由任务 Agent 登记，并用 list_task_findings 核对结果。"
 		}
-		guidance += "\n\n**PoC 截图（可选）**：浏览器可验证的漏洞（XSS、登录成功、越权页面、文件上传回显等）复现成功时，可用 browser 工具截图，保存为 f<finding_id>-s<步骤号>-poc-<序号>.png 放到当前任务目录；生成 Word 报告时会自动插入对应漏洞并配图注。没有截图不影响报告生成。"
 		if has["prove_goal"] || has["goal_met"] {
 			guidance += "\n判定目标完成前，先完成本次已有证据的上报/交接。不要在证据交接尚未完成时仅因文字漏洞已登记就结束任务、取消 Worker；无包不要求等待或强行抓包。"
 		}
