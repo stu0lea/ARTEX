@@ -478,14 +478,14 @@ func (r *renderer) codeParagraph(text string) string {
 func (r *renderer) headParagraph(text string) string {
 	text = strings.TrimSpace(text)
 	pPr := `<w:pPr><w:wordWrap w:val="true"/><w:spacing w:before="160" w:after="80"/></w:pPr>`
-	return "<w:p>" + pPr + runXML(boldRPr, text) + "</w:p>"
+	return "<w:p>" + pPr + inlineRuns(text, boldRPr) + "</w:p>"
 }
 
 func (r *renderer) captionParagraph(text string) string {
 	text = strings.TrimSpace(text)
 	r.figSeq++
 	pPr := `<w:pPr><w:wordWrap w:val="true"/><w:spacing w:after="200"/><w:jc w:val="center"/></w:pPr>`
-	return "<w:p>" + pPr + runXML(captionRPr, fmt.Sprintf("图 %d  %s", r.figSeq, text)) + "</w:p>"
+	return "<w:p>" + pPr + inlineRuns(fmt.Sprintf("图 %d  %s", r.figSeq, text), captionRPr) + "</w:p>"
 }
 
 const (

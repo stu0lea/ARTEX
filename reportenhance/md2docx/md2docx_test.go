@@ -212,6 +212,41 @@ func TestRenderPublicTemplate(t *testing.T) {
 	}
 }
 
+func TestRenderInlineCodeInHeadingAndCaption(t *testing.T) {
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "shot.png"), 60, 30)
+
+	md := "# [HIGH] 标题行内代码\n\n" +
+		"## 详细报告\n\n" +
+		"# 标题行内代码\n\n" +
+		"- **类型**：其他\n" +
+		"- **等级**：高危\n\n" +
+		"## 概述\n\n正文。\n\n" +
+		"## 证据 1：未认证 POST 成功创建（`HTTP/1.1 200 OK` 完整响应头 + 响应体）\n\n" +
+		"![响应头 `HTTP/1.1 200 OK`](shot.png)\n"
+
+	out, err := Convert(md, dir, ConvertOptions{}, testTemplate(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(unzip(t, out)["word/document.xml"])
+	for _, bad := range []string{inlineCodeStart, inlineCodeEnd} {
+		if strings.Contains(doc, bad) {
+			t.Fatalf("document.xml 残留行内代码私有区标记 %q", bad)
+		}
+	}
+	// 行内代码会拆成多个 run，分别校验标题与图注文字仍然保留。
+	for _, want := range []string{
+		"证据 1：未认证 POST 成功创建（",
+		"完整响应头 + 响应体）",
+		"图 1  响应头 ",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("document.xml 缺少 %q", want)
+		}
+	}
+}
+
 func TestConvertInMemory(t *testing.T) {
 	dir := t.TempDir()
 	writePNG(t, filepath.Join(dir, "shot.png"), 60, 30)
