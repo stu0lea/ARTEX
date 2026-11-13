@@ -15,10 +15,7 @@ services:
     restart: unless-stopped
 
   artex:
-    image: artex-kali:0.3.16-full
-    build:
-      context: .
-      dockerfile: Dockerfile.kali
+    image: artex:${ARTEX_TAG:-latest}
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,10 +43,6 @@ services:
       # Word 报告模板：直接挂仓库里的 docx，改完点「重新生成」即生效，
       # 不需要重新 go build / 重建镜像。
       - ./reportenhance/assets:/app/report-assets:ro
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
-    shm_size: "1gb"
     restart: unless-stopped
 
 volumes:
