@@ -30,6 +30,23 @@ ensure_docker(){
   esac
 }
 
+# ── ① 的本地构建：编译二进制并构建镜像 ───────────
+build_image_local(){
+  command -v go  >/dev/null 2>&1 || die "未检测到 Go（>=1.26）：https://go.dev/dl/"
+  command -v npm >/dev/null 2>&1 || die "未检测到 npm（需 Node 20）：https://nodejs.org/"
+  info "构建前端静态产物…"
+  ( cd web && npm ci --registry=https://registry.npmmirror.com && npm run build:static )
+  rm -rf server/webui/dist && cp -r web/out server/webui/dist
+  local arch; arch="$(go env GOARCH)"
+  mkdir -p "dist/${arch}"
+  info "编译 linux/${arch} 单二进制…"
+  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+    go build -tags embedui -trimpath -o "dist/${arch}/artex" ./cmd/artex
+  info "构建镜像 artex:local…"
+  docker compose build
+  ok "本地镜像构建完成"
+}
+
 # ── ① 全部 Docker ───────────────────────────────
 install_docker(){
   ensure_docker
@@ -45,8 +62,25 @@ install_docker(){
   else
     info "沿用已存在的 .env"
   fi
-  info "拉取镜像并启动…"
-  docker compose pull || true
+  local tag
+  tag="$(sed -n 's/^ARTEX_TAG=//p' .env 2>/dev/null | tail -1)"
+  tag="${tag:-local}"
+  if [ "$tag" = local ]; then
+    info "ARTEX_TAG=local：本地编译并构建镜像…"
+    build_image_local
+  else
+    info "拉取镜像 artex:${tag}…"
+    if ! docker compose pull; then
+      warn "镜像拉取失败（未发布或网络不可达）"
+      if [ "$(ask '改为本地编译并构建镜像? (y/n)' y)" = y ]; then
+        sed -i.bak "s|^ARTEX_TAG=.*|ARTEX_TAG=local|" .env && rm -f .env.bak
+        build_image_local
+      else
+        die "已取消；可将 ARTEX_TAG 设为可拉取的版本号后重试"
+      fi
+    fi
+  fi
+  info "启动容器…"
   docker compose up -d
   ok "启动完成 → http://localhost:8787"
   info "查看日志：docker compose logs -f artex"
